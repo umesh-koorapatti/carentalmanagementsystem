@@ -1,0 +1,222 @@
+!pip install flask pyngrok
+
+from flask import Flask, render_template_string, request, redirect, url_for, send_file
+import sqlite3
+from pyngrok import ngrok
+import csv
+import os
+from io import StringIO
+
+# Ngrok auth token
+ngrok.set_auth_token("2viSVyYN8iqPEI4g7sfjA96p11f_3B8H71CPLy3uUbBq5PgLa")
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Reset database
+if os.path.exists("car_rental.db"):
+    os.remove("car_rental.db")
+
+conn = sqlite3.connect("car_rental.db")
+cur = conn.cursor()
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS cars (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        available INTEGER DEFAULT 1
+    )
+""")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS bookings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_name TEXT NOT NULL,
+        car_id INTEGER NOT NULL,
+        days INTEGER NOT NULL,
+        FOREIGN KEY(car_id) REFERENCES cars(id)
+    )
+""")
+
+# Initial data
+cur.execute("SELECT COUNT(*) FROM cars")
+if cur.fetchone()[0] == 0:
+    cur.executemany("INSERT INTO cars (name) VALUES (?)", [
+        ("Honda City",), ("Toyota Innova",), ("Suzuki Swift",)
+    ])
+conn.commit()
+conn.close()
+
+# HTML Template
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Car Rental Management</title>
+    <style>
+        body { font-family: Arial; background: #eef1f5; padding: 30px; }
+        h1, h2 { text-align: center; }
+        form, table {
+            background: #fff; margin: 20px auto; padding: 20px;
+            max-width: 600px; border-radius: 10px; box-shadow: 0 0 10px #ccc;
+        }
+        input, select, button {
+            width: 100%; margin-top: 10px; padding: 10px;
+            border-radius: 5px; border: 1px solid #ccc;
+        }
+        table { width: 90%; border-collapse: collapse; }
+        th, td {
+            padding: 12px; text-align: center;
+            border-bottom: 1px solid #ddd;
+        }
+        th { background-color: #f2f2f2; }
+        .note, .admin-link, .export-link { text-align: center; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Car Rental Management System</h1>
+    <form action="/book" method="post">
+        <input name="name" placeholder="Customer Name" required>
+        <select name="car_id" required>
+            <option value="" disabled selected>Select a Car</option>
+            {% for car in cars %}
+                <option value="{{ car[0] }}">{{ car[1] }}</option>
+            {% endfor %}
+        </select>
+        <input type="number" name="days" placeholder="Rental Days" min="1" required>
+        <button type="submit">Book Car</button>
+    </form>
+
+    <form action="/" method="get" style="text-align:center;">
+        <input name="search" placeholder="Search by Customer" value="{{ search }}">
+        <button type="submit">Search</button>
+    </form>
+
+    <h2>Booking Summary</h2>
+    <table>
+        <tr><th>Customer</th><th>Car</th><th>Days</th><th>Action</th></tr>
+        {% for b in bookings %}
+        <tr>
+            <td>{{ b[0] }}</td>
+            <td>{{ b[1] }}</td>
+            <td>{{ b[2] }}</td>
+            <td>
+                <form action="/return" method="post">
+                    <input type="hidden" name="car_id" value="{{ b[3] }}">
+                    <button type="submit">Return</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    <div class="admin-link">
+        <a href="/admin">Admin Panel</a> |
+        <a href="/export">Download Bookings (CSV)</a>
+    </div>
+</body>
+</html>
+'''
+
+@app.route("/")
+def index():
+    search = request.args.get("search", "")
+    conn = sqlite3.connect("car_rental.db")
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, name FROM cars WHERE available = 1")
+    cars = cur.fetchall()
+
+    if search:
+        cur.execute("""
+            SELECT customer_name,
+                   (SELECT name FROM cars WHERE id=car_id),
+                   days, car_id
+            FROM bookings
+            WHERE customer_name LIKE ?
+        """, ('%' + search + '%',))
+    else:
+        cur.execute("""
+            SELECT customer_name,
+                   (SELECT name FROM cars WHERE id=car_id),
+                   days, car_id
+            FROM bookings
+        """)
+    bookings = cur.fetchall()
+
+    conn.close()
+    return render_template_string(HTML_TEMPLATE, cars=cars, bookings=bookings, search=search)
+
+@app.route("/book", methods=["POST"])
+def book():
+    name = request.form["name"]
+    car_id = int(request.form["car_id"])
+    days = int(request.form["days"])
+
+    conn = sqlite3.connect("car_rental.db")
+    cur = conn.cursor()
+
+    cur.execute("INSERT INTO bookings (customer_name, car_id, days) VALUES (?, ?, ?)", (name, car_id, days))
+    cur.execute("UPDATE cars SET available = 0 WHERE id = ?", (car_id,))
+
+    conn.commit()
+    conn.close()
+
+    # Simulate email/SMS notification
+    print(f"Sending confirmation to {name} for {days} day(s)")
+
+    return redirect(url_for("index"))
+
+@app.route("/return", methods=["POST"])
+def return_car():
+    car_id = int(request.form["car_id"])
+    conn = sqlite3.connect("car_rental.db")
+    cur = conn.cursor()
+    cur.execute("UPDATE cars SET available = 1 WHERE id = ?", (car_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for("index"))
+
+@app.route("/admin")
+def admin_panel():
+    conn = sqlite3.connect("car_rental.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT customer_name, (SELECT name FROM cars WHERE id=car_id), days
+        FROM bookings
+    """)
+    data = cur.fetchall()
+    conn.close()
+    html = "<h1>Admin Panel</h1><table border=1><tr><th>Customer</th><th>Car</th><th>Days</th></tr>"
+    for row in data:
+        html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
+    html += "</table><br><a href='/'>Back to Home</a>"
+    return html
+
+@app.route("/export")
+def export_csv():
+    conn = sqlite3.connect("car_rental.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT customer_name, (SELECT name FROM cars WHERE id=car_id), days
+        FROM bookings
+    """)
+    bookings = cur.fetchall()
+    conn.close()
+
+    si = StringIO()
+    cw = csv.writer(si)
+    cw.writerow(["Customer", "Car", "Days"])
+    cw.writerows(bookings)
+    output = si.getvalue()
+    si.close()
+
+    return send_file(
+        StringIO(output),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="bookings.csv"
+    )
+
+# Start ngrok tunnel and Flask server
+public_url = ngrok.connect(5000)
+print(f"App URL: {public_url}")
+app.run(port=5000)
